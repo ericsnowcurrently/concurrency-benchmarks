@@ -106,14 +106,14 @@ def mode_threads_shared_executor(mbs, grid, num_threads=80):
 # multiple interpreters
 
 def mode_interpreters_not_shared_channel(mbs, grid, num_interpreters=20):
-    from test.support import interpreters
-    import _xxinterpchannels as _channels
+    import test.support.interpreters as interpreters
+    import test.support.interpreters.channels
 
     values = grid.values
 
     # Create the task and results queues.
-    tasks_r, tasks_s = interpreters.create_channel()
-    results_r, results_s = interpreters.create_channel()
+    tasks_r, tasks_s = interpreters.channels.create()
+    results_r, results_s = interpreters.channels.create()
     running = queue.Queue()
 
     # Start the results thread.
@@ -122,7 +122,7 @@ def mode_interpreters_not_shared_channel(mbs, grid, num_interpreters=20):
             try:
                 msg = results_r.recv()
                 #i, res = results_r.recv()
-            except _channels.ChannelClosedError:
+            except interpreters.channels.ChannelClosedError:
                 break
             i, value = msg.split(':')
             values[int(i)] = float(value)
@@ -134,14 +134,16 @@ def mode_interpreters_not_shared_channel(mbs, grid, num_interpreters=20):
     # Start the workers.
     def run_worker():
         interp = interpreters.create()
-        interp.run(f'''if True:
-            from test.support import interpreters
+        interp.prepare_main(ch_tasks=tasks_r, ch_results=results_s)
+        interp.exec(f'''if True:
+            import test.support.interpreters as interpreters
+            import test.support.interpreters.channels
             import sys
             sys.path.insert(0, {IMPORT_PATH_ENTRY!r})
             from mandelbrot import MandelbrotSet, GridSpec
 
-            ch_tasks = interpreters.RecvChannel(tasks)
-            ch_results = interpreters.SendChannel(results)
+            ch_tasks = interpreters.channels.RecvChannel(tasks)
+            ch_results = interpreters.channels.SendChannel(results)
 
             mbs = MandelbrotSet({mbs.maxiterations})
             grid = GridSpec(*{tuple(grid.spec)})
@@ -149,15 +151,14 @@ def mode_interpreters_not_shared_channel(mbs, grid, num_interpreters=20):
             while True:
                 try:
                     i = ch_tasks.recv()
-                except interpreters.ChannelClosedError:
+                except interpreters.channels.ChannelClosedError:
                     break
                 i = int(i)
                     
                 x, y = grid.get_point(i)
                 value = mbs.stability_xy(x, y)
                 ch_results.send(f'{{i}}:{{value}}')
-            ''',
-            channels=dict(tasks=tasks_r.id, results=results_s.id))
+            ''')
     threads = [threading.Thread(target=run_worker)
                for _ in range(num_interpreters or 20)]
     for t in threads:
@@ -210,18 +211,26 @@ def mode_interpreters_not_shared_channel(mbs, grid, num_interpreters=20):
 
 def mode_interpreters_shared_channel(mbs, grid, num_interpreters=20):
 #    num_interpreters = 1
-    from test.support import interpreters
-    import _xxinterpchannels as _channels
+    import test.support.interpreters as interpreters
+    import test.support.interpreters.channels
 
     values = grid.values
 
     # Create the task queue.
-    tasks_r, tasks_s = interpreters.create_channel()
-    values_r, values_s = interpreters.create_channel()
+    tasks_r, tasks_s = interpreters.channels.create()
+    values_r, values_s = interpreters.channels.create()
 
     # Start the workers.
     def run_worker():
         interp = interpreters.create()
+        interp.prepare_main(
+            ch_tasks=tasks_r,
+            ch_values=values_r,
+            maxiterations=mbs.maxiterations,
+            _gridspec=str(tuple(grid.spec)),
+            #_gridspec=tuple(grid.spec),
+        )
+
 #        interp.run(f'''if True:
 #            from test.support import interpreters
 #            from mandelbrot import MandelbrotSet, GridSpec
@@ -244,7 +253,7 @@ def mode_interpreters_shared_channel(mbs, grid, num_interpreters=20):
 #            channels=dict(ch_tasks=tasks_r, ch_values=values_r))
 
         def script():
-            from test.support import interpreters
+            from test.support.interpreters import channels
             from mandelbrot import MandelbrotSet, GridSpec
 
             values = ch_values.recv()
@@ -263,21 +272,14 @@ def mode_interpreters_shared_channel(mbs, grid, num_interpreters=20):
             while True:
                 try:
                     i = ch_tasks.recv()
-                except interpreters.ChannelClosedError:
+                except channels.ChannelClosedError:
                     break
                 i = int(i)
                     
                 # XXX Work on a span of entries to avoid cache collisions.
                 x, y = grid.get_point(i)
                 values[i] = mbs.stability_xy(x, y)
-
-        interp.run(script, channels=dict(
-                   ch_tasks=tasks_r,
-                   ch_values=values_r,
-                   maxiterations=mbs.maxiterations,
-                   _gridspec=str(tuple(grid.spec)),
-                   #_gridspec=tuple(grid.spec),
-                   ))
+        interp.call(script)
     threads = [threading.Thread(target=run_worker)
                for _ in range(num_interpreters or 20)]
     for t in threads:
@@ -303,7 +305,7 @@ def mode_interpreters_shared_channel(mbs, grid, num_interpreters=20):
         while True:
             tasks_r.recv_nowait()
             completed = False
-    except interpreters.ChannelClosedError:
+    except interpreters.channels.ChannelClosedError:
         pass
     assert completed
     assert tasks_r.is_closed, tasks_r._info
@@ -311,7 +313,7 @@ def mode_interpreters_shared_channel(mbs, grid, num_interpreters=20):
 
 def mode_interpreters_not_shared_pipe(mbs, grid, num_interpreters=20):
     import os
-    from test.support import interpreters
+    import test.support.interpreters as interpreters
 
     values = grid.values
 
@@ -350,7 +352,7 @@ def mode_interpreters_not_shared_pipe(mbs, grid, num_interpreters=20):
     # Start the workers.
     def run_worker(i):
         interp = interpreters.create()
-        interp.run(f'''if True:
+        interp.exec(f'''if True:
             import os
             import time
 
@@ -368,7 +370,7 @@ def mode_interpreters_not_shared_pipe(mbs, grid, num_interpreters=20):
             #log = (lambda *a, **k: print(f'{{workerid:>3}}', *a, **k))
             log = (lambda *a, **k: None)
             ''')
-        interp.run(f'''if True:
+        interp.exec(f'''if True:
             #tasks = os.fdopen({tasks_r})
             #results = os.fdopen({results_s}, 'w')
             try:
@@ -465,17 +467,18 @@ def mode_interpreters_not_shared_pipe(mbs, grid, num_interpreters=20):
 
 def mode_interpreters_shared_pipe(mbs, grid, num_interpreters=20):
     raise NotImplementedError  # XXX
-    from test.support import interpreters
-    import _xxinterpchannels as _channels
+    import test.support.interpreters as interpreters
+    import test.support.interpreters.channels
 
     # Create the task queue.
-    tasks_r, tasks_s = interpreters.create_channel()
+    tasks_r, tasks_s = interpreters.channels.create()
 
     # Start the workers.
     def run_worker():
         interp = interpreters.create()
-        interp.run(f'''if True:
-            import _xxinterpchannels as _channels
+        interp.prepare_main(tasks=tasks_r, values=values)
+        interp.exec(f'''if True:
+            #from test.support.interpreters import channels
             import sys
             sys.path.insert(0, {IMPORT_PATH_ENTRY!r})
             from mandelbrot import MandelbrotSet, GridSpec
@@ -491,8 +494,7 @@ def mode_interpreters_shared_pipe(mbs, grid, num_interpreters=20):
                     
                 x, y = grid.get_point(i)
                 values[i] = mbs.stability_xy(x, y)
-            ''',
-            channels=dict(tasks=tasks_r, values=values))
+            ''')
     threads = [threading.Thread(target=run_worker)
                for _ in range(num_interpreters or 20)]
     for t in threads:
