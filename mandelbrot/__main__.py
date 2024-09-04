@@ -111,12 +111,24 @@ def parse_args(argv=sys.argv[1:], prog=sys.argv[0]):
     return ns
 
 
-def main(maxiterations=100, density=None, output='stdout', concurrent=None):
+def main(maxiterations=100, density=None, output='stdout', concurrent=None, *,
+         header=False,
+         ):
     if not density:
         if output == 'stdout':
             density = 80
         else:
             density = 512
+
+    if header:
+        print('#' * 40)
+        concurrentname = getattr(concurrent, '_concurrent', '--')
+        print(f'# concurrent:     {concurrentname}')
+        print(f'# density:        {density}')
+        print(f'# max iterations: {maxiterations}')
+        print(f'# output:         {output}')
+        print('#' * 40)
+        print()
 
     try:
         output = OUTPUT[output]
@@ -130,4 +142,4 @@ def main(maxiterations=100, density=None, output='stdout', concurrent=None):
 
 if __name__ == '__main__':
     kwargs = parse_args()
-    main(**kwargs)
+    main(header=True, **kwargs)
